@@ -1,5 +1,5 @@
 {
-  "name": "bank-converter-api-vercel",
+  "name": "bank-converter-api-vercel-final",
   "version": "1.0.0",
   "description": "Vercel-ready API for converting bank statements.",
   "main": "api/index.js",
