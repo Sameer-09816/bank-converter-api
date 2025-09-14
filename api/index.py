@@ -5,29 +5,49 @@ import logging
 import traceback
 import aiofiles
 from fastapi import FastAPI, UploadFile, File, HTTPException, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 from fastapi.middleware.cors import CORSMiddleware
-from upstash_redis import Redis
+import redis.asyncio as redis # **FIX**: Import the standard asyncio redis client
+
+# Vercel's build environment places root files where they can be imported directly.
 import api_calls
 import utils
 
-# ... (The full, correct code from the previous response is unchanged)
-app = FastAPI()
+# --- Application Setup with Documentation ---
+app = FastAPI(
+    title="Bank Statement Converter API",
+    description="An unofficial API that automates the process of converting bank statement PDFs to CSV format. It manages accounts and sessions automatically for continuous use.",
+    version="1.1.0",
+    docs_url="/api/docs",
+    redoc_url="/api/redoc",
+)
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"],
 )
 logging.basicConfig(level=logging.INFO)
-REDIS_URL = os.environ.get('UPSTASH_REDIS_REST_URL')
-REDIS_TOKEN = os.environ.get('UPSTASH_REDIS_REST_TOKEN')
-if not all([REDIS_URL, REDIS_TOKEN]):
-    logging.error("FATAL ERROR: Redis environment variables are not set.")
-    redis = None
+
+# --- Robust Initialization with Environment Variable Checks ---
+REDIS_CONNECTION_URL = os.environ.get('REDIS_URL')
+
+if not REDIS_CONNECTION_URL:
+    logging.error("FATAL ERROR: REDIS_URL environment variable is not set.")
+    redis_client = None
 else:
-    redis = Redis(url=REDIS_URL, token=REDIS_TOKEN)
+    # **FIX**: Initialize the standard redis-py async client from the URL
+    try:
+        redis_client = redis.from_url(REDIS_CONNECTION_URL, decode_responses=True)
+    except Exception as e:
+        logging.error(f"FATAL ERROR: Could not connect to Redis. Please check the REDIS_URL. Error: {e}")
+        redis_client = None
+
+
 SESSION_KEY = "py_bank_converter_session_final"
 MAX_USAGE = 5
 MAX_REGISTRATION_ATTEMPTS = 3
+
+# --- Global Exception Handler ---
 @app.exception_handler(Exception)
 async def global_exception_handler(request: Request, exc: Exception):
     error_traceback = traceback.format_exc()
@@ -41,20 +61,27 @@ async def global_exception_handler(request: Request, exc: Exception):
             "exception_type": type(exc).__name__
         },
     )
+
 async def check_redis_connection():
-    if redis is None:
+    """Helper function to check for Redis before any operation."""
+    if redis_client is None:
         raise HTTPException(
             status_code=503, 
-            detail="Service Unavailable: Redis database is not configured. Please check server environment variables."
+            detail="Service Unavailable: Redis database is not configured or connection failed."
         )
-async def load_session(): # ... (code is unchanged)
+
+# --- State Management (Now using redis-py syntax) ---
+async def load_session():
     await check_redis_connection()
-    session_str = await redis.get(SESSION_KEY)
+    session_str = await redis_client.get(SESSION_KEY) # **FIX**: Use redis_client
     return json.loads(session_str) if session_str else {"token": None, "usage_count": 0}
-async def save_session(session_data): # ... (code is unchanged)
+
+async def save_session(session_data):
     await check_redis_connection()
-    await redis.set(SESSION_KEY, json.dumps(session_data))
-async def create_new_session(): # ... (code is unchanged)
+    await redis_client.set(SESSION_KEY, json.dumps(session_data)) # **FIX**: Use redis_client
+
+# ... (The rest of the functions like create_new_session and get_valid_token are unchanged internally)
+async def create_new_session():
     logging.info("--- Attempting to create a new session ---")
     for attempt in range(MAX_REGISTRATION_ATTEMPTS):
         logging.info(f"Registration attempt {attempt + 1}/{MAX_REGISTRATION_ATTEMPTS}")
@@ -80,17 +107,20 @@ async def create_new_session(): # ... (code is unchanged)
         except Exception as e:
             logging.error(f"Exception during session creation attempt {attempt + 1}: {e}", exc_info=True)
     raise Exception("Failed to create a new session after multiple attempts.")
-async def get_valid_token(): # ... (code is unchanged)
+async def get_valid_token():
     session = await load_session()
     if not session.get("token") or session.get("usage_count", 0) >= MAX_USAGE:
         logging.info("Token expired or not available. Creating new session.")
         session = await create_new_session()
     return session["token"]
-@app.get("/api")
+
+# --- API Endpoints with Documentation ---
+@app.get("/api", tags=["Status"], summary="Check API Health")
 async def root():
-    return {"status": "Bank Statement Converter API is fully operational on Vercel with FastAPI"}
-@app.post("/api/convert-statement")
-async def convert_statement_endpoint(file: UploadFile = File(...)): # ... (code is unchanged)
+    return {"status": "Bank Statement Converter API is fully operational"}
+
+@app.post("/api/convert-statement", tags=["Conversion"], summary="Convert a Bank Statement PDF to CSV")
+async def convert_statement_endpoint(file: UploadFile = File(..., description="The bank statement PDF file to be converted.")):
     if not file.filename.lower().endswith('.pdf'):
         raise HTTPException(status_code=400, detail="Invalid file type. Please upload a PDF.")
     temp_path = f"/tmp/{file.filename}"
@@ -105,12 +135,4 @@ async def convert_statement_endpoint(file: UploadFile = File(...)): # ... (code 
         logging.info(f"Upload successful. UUID: {upload_uuid}")
         csv_data = await api_calls.poll_and_convert_statement(auth_token, upload_uuid)
         session = await load_session()
-        session["usage_count"] = session.get("usage_count", 0) + 1
-        await save_session(session)
-        logging.info(f"Token usage updated to: {session['usage_count']}/{MAX_USAGE}")
-        headers = {'Content-Disposition': f'attachment; filename="converted_{file.filename}.csv"'}
-        return Response(content=csv_data, media_type='text/csv', headers=headers)
-    finally:
-        if os.path.exists(temp_path):
-            os.remove(temp_path)
-            logging.info(f"Cleaned up temporary file: {temp_path}")
+        session["usage_count"] = se
