@@ -8,41 +8,26 @@ from fastapi import FastAPI, UploadFile, File, HTTPException, Request
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from upstash_redis import Redis
-
-# Vercel's build environment places root files where they can be imported directly.
 import api_calls
 import utils
 
-# --- Application Setup ---
+# ... (The full, correct code from the previous response is unchanged)
 app = FastAPI()
-
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"],
 )
 logging.basicConfig(level=logging.INFO)
-
-
-# --- Robust Initialization with Environment Variable Checks ---
 REDIS_URL = os.environ.get('UPSTASH_REDIS_REST_URL')
 REDIS_TOKEN = os.environ.get('UPSTASH_REDIS_REST_TOKEN')
-
 if not all([REDIS_URL, REDIS_TOKEN]):
-    # This will be logged on Vercel if the variables are missing
     logging.error("FATAL ERROR: Redis environment variables are not set.")
-    # We create a dummy Redis object to prevent an immediate crash,
-    # but any route that uses it will fail gracefully.
     redis = None
 else:
     redis = Redis(url=REDIS_URL, token=REDIS_TOKEN)
-
 SESSION_KEY = "py_bank_converter_session_final"
 MAX_USAGE = 5
 MAX_REGISTRATION_ATTEMPTS = 3
-
-
-# --- Global Exception Handler (CRITICAL FIX) ---
-# This will catch any unhandled exception and prevent the function from crashing.
 @app.exception_handler(Exception)
 async def global_exception_handler(request: Request, exc: Exception):
     error_traceback = traceback.format_exc()
@@ -56,28 +41,20 @@ async def global_exception_handler(request: Request, exc: Exception):
             "exception_type": type(exc).__name__
         },
     )
-
-
 async def check_redis_connection():
-    """Helper function to check for Redis before any operation."""
     if redis is None:
         raise HTTPException(
             status_code=503, 
             detail="Service Unavailable: Redis database is not configured. Please check server environment variables."
         )
-
-# --- State Management (Now with connection checks) ---
-async def load_session():
+async def load_session(): # ... (code is unchanged)
     await check_redis_connection()
     session_str = await redis.get(SESSION_KEY)
     return json.loads(session_str) if session_str else {"token": None, "usage_count": 0}
-
-async def save_session(session_data):
+async def save_session(session_data): # ... (code is unchanged)
     await check_redis_connection()
     await redis.set(SESSION_KEY, json.dumps(session_data))
-
-async def create_new_session():
-    # ... (This function's internal logic remains the same)
+async def create_new_session(): # ... (code is unchanged)
     logging.info("--- Attempting to create a new session ---")
     for attempt in range(MAX_REGISTRATION_ATTEMPTS):
         logging.info(f"Registration attempt {attempt + 1}/{MAX_REGISTRATION_ATTEMPTS}")
@@ -103,47 +80,36 @@ async def create_new_session():
         except Exception as e:
             logging.error(f"Exception during session creation attempt {attempt + 1}: {e}", exc_info=True)
     raise Exception("Failed to create a new session after multiple attempts.")
-
-
-async def get_valid_token():
+async def get_valid_token(): # ... (code is unchanged)
     session = await load_session()
     if not session.get("token") or session.get("usage_count", 0) >= MAX_USAGE:
         logging.info("Token expired or not available. Creating new session.")
         session = await create_new_session()
     return session["token"]
-
-# --- API Endpoints ---
 @app.get("/api")
 async def root():
     return {"status": "Bank Statement Converter API is fully operational on Vercel with FastAPI"}
-
 @app.post("/api/convert-statement")
-async def convert_statement_endpoint(file: UploadFile = File(...)):
+async def convert_statement_endpoint(file: UploadFile = File(...)): # ... (code is unchanged)
     if not file.filename.lower().endswith('.pdf'):
         raise HTTPException(status_code=400, detail="Invalid file type. Please upload a PDF.")
-    
     temp_path = f"/tmp/{file.filename}"
     try:
         async with aiofiles.open(temp_path, 'wb') as out_file:
             content = await file.read()
             await out_file.write(content)
         logging.info(f"File '{file.filename}' saved to '{temp_path}'")
-
         auth_token = await get_valid_token()
         logging.info("Uploading bank statement...")
         upload_uuid = await api_calls.upload_statement(auth_token, temp_path, file.filename)
         logging.info(f"Upload successful. UUID: {upload_uuid}")
-
         csv_data = await api_calls.poll_and_convert_statement(auth_token, upload_uuid)
-        
         session = await load_session()
         session["usage_count"] = session.get("usage_count", 0) + 1
         await save_session(session)
         logging.info(f"Token usage updated to: {session['usage_count']}/{MAX_USAGE}")
-        
         headers = {'Content-Disposition': f'attachment; filename="converted_{file.filename}.csv"'}
         return Response(content=csv_data, media_type='text/csv', headers=headers)
-
     finally:
         if os.path.exists(temp_path):
             os.remove(temp_path)
