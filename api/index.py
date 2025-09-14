@@ -24,7 +24,9 @@ TEMP_MAIL_DOMAINS = [
 # --- State Management Class ---
 class AccountManager:
     """
-    Manages the account lifecycle using Redis for persistent state.
+    Manages the account lifecycle with a robust dual-mode state:
+    - Uses Redis when available (on Vercel).
+    - Falls back to a temporary in-memory dictionary for local testing.
     """
     def __init__(self):
         # WARNING: Hardcoding secrets is a security risk. Use environment variables in production.
@@ -33,13 +35,18 @@ class AccountManager:
         try:
             self.redis_client = redis.from_url(redis_url, ssl_cert_reqs=None)
             self.redis_client.ping()
-            print("Successfully connected to Redis Cloud (SSL verification disabled).")
+            self._in_memory_state = None  # In-memory mode is disabled
+            print("MODE: Connected to Redis. Persistent state is ENABLED.")
         except Exception as e:
-            print(f"CRITICAL: Could not connect to Redis. Error: {e}")
+            # ## FIX: Implement fallback to in-memory state for local development ##
             self.redis_client = None
+            self._in_memory_state = {"credits": 0, "auth_token": None}
+            print("----------------------------------------------------------------")
+            print(f"WARNING: Could not connect to Redis. Error: {e}")
+            print("MODE: Switching to temporary in-memory state for local testing.")
+            print("----------------------------------------------------------------")
 
     def _generate_credentials(self):
-        """Generates random credentials."""
         username = ''.join(random.choices(string.ascii_lowercase + string.digits, k=10))
         domain = random.choice(TEMP_MAIL_DOMAINS)
         email = f"{username}@{domain}"
@@ -47,34 +54,25 @@ class AccountManager:
         return email, password
 
     async def _get_verification_link(self, client: httpx.AsyncClient, email: str) -> Optional[str]:
-        """Polls the inbox, respecting serverless timeout limits."""
         for _ in range(3):
             print(f"Checking inbox for {email}...")
             try:
                 inbox_res = await client.get(f"{TEMP_MAIL_API_BASE}/emails/{email}", timeout=5.0)
-                inbox_res.raise_for_status()
                 inbox_data = inbox_res.json()
                 if inbox_data.get("success") and inbox_data.get("result"):
                     email_id = inbox_data["result"][0].get("id")
                     content_res = await client.get(f"{TEMP_MAIL_API_BASE}/inbox/{email_id}", timeout=5.0)
-                    html_content = content_res.json()["result"]["html_content"]
-                    soup = BeautifulSoup(html_content, 'html.parser')
+                    soup = BeautifulSoup(content_res.json()["result"]["html_content"], 'html.parser')
                     link_tag = soup.find('a', string=re.compile(r'\s*Verify my email\s*'))
                     if link_tag and 'href' in link_tag.attrs:
-                        print("Verification link found.")
                         return link_tag['href']
             except Exception as e:
                 print(f"Warning: Issue while polling email: {e}")
             await asyncio.sleep(2)
-        print("Verification link not found in time.")
         return None
 
     async def create_new_account(self):
-        """Creates a new account and saves its state to Redis."""
-        if not self.redis_client:
-            raise HTTPException(status_code=503, detail="State management service (Redis) is not available.")
-
-        print("Creating a new account and saving state to Redis...")
+        print("Creating a new account...")
         email, password = self._generate_credentials()
         credentials = {"email": email, "firstName": "Test", "lastName": "User", "password": password, "referredBy": ""}
 
@@ -85,63 +83,68 @@ class AccountManager:
                 raise HTTPException(status_code=504, detail="Could not retrieve verification email within the time limit.")
             
             await client.get(verification_link, follow_redirects=True)
-            
             login_res = await client.post(f"{BANK_API_BASE}/login", json={"email": email, "password": password})
             login_res.raise_for_status()
             token = login_res.json()["token"]
 
-            self.redis_client.set("auth_token", token)
-            self.redis_client.set("credits", 5)
-            print("New account state saved successfully to Redis.")
+            # Save state to the appropriate backend (Redis or in-memory)
+            if self.redis_client:
+                self.redis_client.set("auth_token", token)
+                self.redis_client.set("credits", 5)
+                print("New account state saved to Redis.")
+            else:
+                self._in_memory_state["auth_token"] = token
+                self._in_memory_state["credits"] = 5
+                print("New account state saved to temporary in-memory store.")
             return token
 
     async def get_valid_token(self) -> str:
-        """Retrieves a valid token from Redis, creating a new account if necessary."""
-        credits_bytes = self.redis_client.get("credits")
-        credits = int(credits_bytes) if credits_bytes else 0
+        credits = 0
+        token = None
 
-        if credits <= 0:
-            print("No credits in Redis. Triggering new account creation.")
-            return await self.create_new_account()
-        
-        token_bytes = self.redis_client.get("auth_token")
-        if not token_bytes:
-            print("No token in Redis. Triggering new account creation.")
+        if self.redis_client:
+            credits_bytes = self.redis_client.get("credits")
+            credits = int(credits_bytes) if credits_bytes else 0
+            token_bytes = self.redis_client.get("auth_token")
+            token = token_bytes.decode('utf-8') if token_bytes else None
+            print(f"Retrieved state from Redis. Credits: {credits}")
+        else: # Fallback to in-memory
+            credits = self._in_memory_state.get("credits", 0)
+            token = self._in_memory_state.get("auth_token")
+            print(f"Retrieved state from in-memory store. Credits: {credits}")
+
+        if credits <= 0 or not token:
+            print("No credits or token found. Triggering new account creation.")
             return await self.create_new_account()
             
-        print(f"Retrieved valid token from Redis. Credits remaining: {credits}")
-        return token_bytes.decode('utf-8')
+        return token
 
     def use_credit(self):
-        """Decrements the credit count in Redis atomically."""
         if self.redis_client:
             new_credit_count = self.redis_client.decr("credits")
-            print(f"Credit used. Remaining credits in Redis: {new_credit_count}")
+            print(f"Credit used. Remaining in Redis: {new_credit_count}")
+        else: # Fallback to in-memory
+            self._in_memory_state["credits"] -= 1
+            print(f"Credit used. Remaining in-memory: {self._in_memory_state['credits']}")
 
 # --- FastAPI Application ---
-
-## FIX: Re-enabled the documentation by removing `docs_url=None, redoc_url=None`.
 app = FastAPI(
-    title="Vercel-Hosted Bank Statement Converter API",
-    description="An efficient, serverless API wrapper using Redis for state management. Interactive docs are available at /docs.",
-    version="3.4.0",
+    title="Bank Statement Converter API (Dual-Mode)",
+    description="An efficient, serverless API wrapper using Redis on Vercel and a temporary in-memory store for local development.",
+    version="3.5.0",
 )
 
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
-
 account_manager = AccountManager()
 
 @app.get("/", summary="Health Check")
-@app.get("/api", summary="Health Check")
-@app.get("/api/index", summary="Health Check")
 def read_root():
-    return {"status": "API is running"}
+    mode = "Redis (Production)" if account_manager.redis_client else "In-Memory (Local Fallback)"
+    return {"status": "API is running", "state_management_mode": mode}
 
 @app.post("/api/convert-statement", summary="Convert a Bank Statement PDF to CSV")
 async def convert_bank_statement(file: UploadFile = File(..., description="The bank statement PDF file to be converted.")):
-    if not account_manager.redis_client:
-        raise HTTPException(status_code=503, detail="State management service is currently unavailable. Please try again later.")
-
+    # ## FIX: The 503 guard clause is no longer needed because the manager always has a valid state (Redis or in-memory)
     if not file.filename or not file.filename.lower().endswith('.pdf'):
         raise HTTPException(status_code=400, detail="Invalid file type. Please upload a PDF.")
 
@@ -168,9 +171,12 @@ async def convert_bank_statement(file: UploadFile = File(..., description="The b
 
     except httpx.HTTPStatusError as e:
         if e.response.status_code == 401:
-            print("Received 401 Unauthorized. Invalidating state in Redis.")
+            print("Received 401 Unauthorized. Invalidating state.")
+            # Invalidate state in the appropriate backend
             if account_manager.redis_client:
                 account_manager.redis_client.set("credits", 0)
+            else:
+                account_manager._in_memory_state["credits"] = 0
         raise HTTPException(status_code=e.response.status_code, detail=f"Error from backend: {e.response.text}")
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"An unexpected error occurred: {str(e)}")
