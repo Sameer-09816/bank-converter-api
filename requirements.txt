@@ -2,6 +2,6 @@ fastapi
 uvicorn
 httpx
 beautifulsoup4
-upstash-redis
+redis
 python-multipart
 aiofiles
