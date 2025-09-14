@@ -1,0 +1,22 @@
+[Unit]
+Description=Gunicorn instance to serve the Bank Statement Converter API
+After=network.target
+
+[Service]
+# IMPORTANT: Replace 'your_user' with your actual username on the Ubuntu server
+User=your_user
+Group=www-data
+
+# IMPORTANT: Replace this path with the absolute path to your project directory
+WorkingDirectory=/home/your_user/bank_statement_converter
+
+# Command to start the service. Assumes a 'venv' in the project directory.
+ExecStart=/home/your_user/bank_statement_converter/venv/bin/gunicorn \
+    --config gunicorn_config.py \
+    main:app
+
+# Restart the service if it fails
+Restart=always
+
+[Install]
+WantedBy=multi-user.target
