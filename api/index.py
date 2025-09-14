@@ -27,15 +27,15 @@ class AccountManager:
     Manages the account lifecycle using Redis for persistent state.
     """
     def __init__(self):
-        # ## FIX 1: Use `rediss://` for secure SSL/TLS connection.
-        # This is almost always required by cloud Redis providers.
         # WARNING: Hardcoding secrets is a security risk. Use environment variables in production.
         redis_url = "rediss://default:51SWVc4IIcxy9obgiDUL4wy3jlUR5mgH@redis-16077.crce214.us-east-1-3.ec2.redns.redis-cloud.com:16077"
 
         try:
-            self.redis_client = redis.from_url(redis_url)
+            # ## FIX 2: Add `ssl_cert_reqs=None` to bypass SSL verification failure.
+            # This resolves the "[SSL] record layer failure" error in the Vercel environment.
+            self.redis_client = redis.from_url(redis_url, ssl_cert_reqs=None)
             self.redis_client.ping()
-            print("Successfully connected to Redis Cloud via SSL.")
+            print("Successfully connected to Redis Cloud (SSL verification disabled).")
         except Exception as e:
             print(f"CRITICAL: Could not connect to Redis. Error: {e}")
             self.redis_client = None
@@ -50,8 +50,6 @@ class AccountManager:
 
     async def _get_verification_link(self, client: httpx.AsyncClient, email: str) -> Optional[str]:
         """Polls the inbox, respecting serverless timeout limits."""
-        # ## FIX 2: Reduce polling duration to avoid Vercel's 10-second timeout.
-        # 3 attempts with a 2-second delay is ~6 seconds, which is safe.
         for _ in range(3):
             print(f"Checking inbox for {email}...")
             try:
@@ -126,8 +124,8 @@ class AccountManager:
 app = FastAPI(
     title="Vercel-Hosted Bank Statement Converter API",
     description="An efficient, serverless API wrapper using Redis for state management.",
-    version="3.2.0-hotfix",
-    docs_url=None, redoc_url=None, # Disabling docs on production endpoint
+    version="3.3.0-hotfix",
+    docs_url=None, redoc_url=None,
 )
 
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
@@ -142,7 +140,6 @@ def read_root():
 
 @app.post("/api/convert-statement", summary="Convert a Bank Statement PDF to CSV")
 async def convert_bank_statement(file: UploadFile = File(..., description="The bank statement PDF file to be converted.")):
-    # ## FIX 3: Add a guard clause to prevent crashes if Redis connection failed.
     if not account_manager.redis_client:
         raise HTTPException(status_code=503, detail="State management service is currently unavailable. Please try again later.")
 
