@@ -3,10 +3,10 @@ import logging
 import httpx
 from utils import async_sleep
 
+# ... (The full, correct code from the previous response)
 BSC_API_BASE = "https://api2.bankstatementconverter.com/api/v1"
 TEMP_MAIL_API_BASE = "https://api.barid.site"
 REQUEST_TIMEOUT = 60.0
-
 COMMON_HEADERS = {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
 }
@@ -16,7 +16,6 @@ async def poll_and_convert_statement(auth_token: str, uuid: str):
     headers = {**COMMON_HEADERS, "Authorization": auth_token, "Content-Type": "text/plain;charset=UTF-8", "Accept": "text/csv,*/*;q=0.8"}
     payload = f'["{uuid}"]'
     max_wait_time, poll_interval = 90, 3
-
     async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT) as client:
         for _ in range(max_wait_time // poll_interval):
             try:
