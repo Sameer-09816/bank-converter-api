@@ -31,8 +31,6 @@ class AccountManager:
         redis_url = "rediss://default:51SWVc4IIcxy9obgiDUL4wy3jlUR5mgH@redis-16077.crce214.us-east-1-3.ec2.redns.redis-cloud.com:16077"
 
         try:
-            # ## FIX 2: Add `ssl_cert_reqs=None` to bypass SSL verification failure.
-            # This resolves the "[SSL] record layer failure" error in the Vercel environment.
             self.redis_client = redis.from_url(redis_url, ssl_cert_reqs=None)
             self.redis_client.ping()
             print("Successfully connected to Redis Cloud (SSL verification disabled).")
@@ -121,11 +119,12 @@ class AccountManager:
             print(f"Credit used. Remaining credits in Redis: {new_credit_count}")
 
 # --- FastAPI Application ---
+
+## FIX: Re-enabled the documentation by removing `docs_url=None, redoc_url=None`.
 app = FastAPI(
     title="Vercel-Hosted Bank Statement Converter API",
-    description="An efficient, serverless API wrapper using Redis for state management.",
-    version="3.3.0-hotfix",
-    docs_url=None, redoc_url=None,
+    description="An efficient, serverless API wrapper using Redis for state management. Interactive docs are available at /docs.",
+    version="3.4.0",
 )
 
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
