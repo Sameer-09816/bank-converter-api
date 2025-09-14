@@ -18,22 +18,28 @@ BANK_API_BASE = "https://api2.bankstatementconverter.com/api/v1"
 TEMP_MAIL_API_BASE = "https://api.barid.site"
 TEMP_MAIL_DOMAINS = [
     "barid.site", "vwh.sh", "iusearch.lol", "lifetalk.us",
-    "z44d.pro", "wael.fun", "tawbah.site", "kuruptd.ink", "oxno1.space"
+    "z44d.pro", "wael.fun", "tawbah.site", "kuruptd.ink", "oxno.space"
 ]
 
 # --- State Management Class (Refactored for Serverless with Redis) ---
 class AccountManager:
     """
-    Manages the account lifecycle using Vercel KV (Redis) for persistent state.
+    Manages the account lifecycle using Redis for persistent state.
     """
     def __init__(self):
+        # --- MODIFICATION: Hardcoded Redis URL ---
+        # WARNING: This is a major security risk. Do not expose this in public code.
+        # The recommended approach is to use environment variables:
+        # redis_url = os.environ.get("KV_URL")
+        redis_url = "redis://default:51SWVc4IIcxy9obgiDUL4wy3jlUR5mgH@redis-16077.crce214.us-east-1-3.ec2.redns.redis-cloud.com:16077"
+
         try:
-            # Vercel automatically provides the KV_URL environment variable
-            self.redis_client = redis.from_url(os.environ.get("KV_URL"))
-            print("Successfully connected to Vercel KV.")
+            self.redis_client = redis.from_url(redis_url)
+            # Test the connection to fail early if credentials are wrong
+            self.redis_client.ping()
+            print("Successfully connected to Redis Cloud.")
         except Exception as e:
-            # This will fail locally if KV_URL is not set. For Vercel, it's critical.
-            print(f"CRITICAL: Could not connect to Redis. Ensure KV_URL is set in environment. Error: {e}")
+            print(f"CRITICAL: Could not connect to Redis. Check your connection URL and credentials. Error: {e}")
             self.redis_client = None
 
     def _generate_credentials(self):
@@ -70,7 +76,7 @@ class AccountManager:
         if not self.redis_client:
             raise HTTPException(status_code=503, detail="State management service (Redis) is not available.")
 
-        print("Creating a new account and saving state to Vercel KV...")
+        print("Creating a new account and saving state to Redis...")
         email, password = self._generate_credentials()
         credentials = {
             "email": email, "firstName": "Test", "lastName": "User",
@@ -89,10 +95,10 @@ class AccountManager:
             login_res.raise_for_status()
             token = login_res.json()["token"]
 
-            # Save state to Redis instead of instance variables
+            # Save state to Redis
             self.redis_client.set("auth_token", token)
             self.redis_client.set("credits", 5)
-            print("New account state saved successfully to Vercel KV.")
+            print("New account state saved successfully to Redis.")
             return token
 
     async def get_valid_token(self) -> str:
@@ -106,33 +112,32 @@ class AccountManager:
         credits = int(credits_bytes) if credits_bytes else 0
 
         if credits <= 0:
-            print("No credits in KV store. Triggering new account creation.")
+            print("No credits in Redis. Triggering new account creation.")
             return await self.create_new_account()
         
         token_bytes = self.redis_client.get("auth_token")
         if not token_bytes:
-            print("No token in KV store. Triggering new account creation.")
+            print("No token in Redis. Triggering new account creation.")
             return await self.create_new_account()
             
-        print(f"Retrieved valid token from Vercel KV. Credits remaining: {credits}")
+        print(f"Retrieved valid token from Redis. Credits remaining: {credits}")
         return token_bytes.decode('utf-8')
 
     def use_credit(self):
         """Decrements the credit count in Redis atomically."""
         if self.redis_client:
             new_credit_count = self.redis_client.decr("credits")
-            print(f"Credit used. Remaining credits in Vercel KV: {new_credit_count}")
+            print(f"Credit used. Remaining credits in Redis: {new_credit_count}")
 
 # --- FastAPI Application ---
 app = FastAPI(
     title="Vercel-Hosted Bank Statement Converter API",
-    description="An efficient, serverless API wrapper using Vercel KV for state management.",
-    version="3.0.0",
+    description="An efficient, serverless API wrapper using Redis for state management.",
+    version="3.1.0",
 )
 
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
 
-# Instantiate manager once per function invocation
 account_manager = AccountManager()
 
 @app.get("/", summary="Health Check")
@@ -170,8 +175,9 @@ async def convert_bank_statement(file: UploadFile = File(..., description="The b
 
     except httpx.HTTPStatusError as e:
         if e.response.status_code == 401:
-            print("Received 401 Unauthorized. Invalidating state in Vercel KV.")
-            account_manager.redis_client.set("credits", 0)
+            print("Received 401 Unauthorized. Invalidating state in Redis.")
+            if account_manager.redis_client:
+                account_manager.redis_client.set("credits", 0)
         raise HTTPException(status_code=e.response.status_code, detail=f"Error from backend: {e.response.text}")
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"An unexpected error occurred: {str(e)}")
