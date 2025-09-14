@@ -7,7 +7,7 @@ import asyncio
 from typing import Optional
 
 import httpx
-import redis  # New dependency for Vercel KV
+import redis
 from bs4 import BeautifulSoup
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -21,25 +21,23 @@ TEMP_MAIL_DOMAINS = [
     "z44d.pro", "wael.fun", "tawbah.site", "kuruptd.ink", "oxno.space"
 ]
 
-# --- State Management Class (Refactored for Serverless with Redis) ---
+# --- State Management Class ---
 class AccountManager:
     """
     Manages the account lifecycle using Redis for persistent state.
     """
     def __init__(self):
-        # --- MODIFICATION: Hardcoded Redis URL ---
-        # WARNING: This is a major security risk. Do not expose this in public code.
-        # The recommended approach is to use environment variables:
-        # redis_url = os.environ.get("KV_URL")
-        redis_url = "redis://default:51SWVc4IIcxy9obgiDUL4wy3jlUR5mgH@redis-16077.crce214.us-east-1-3.ec2.redns.redis-cloud.com:16077"
+        # ## FIX 1: Use `rediss://` for secure SSL/TLS connection.
+        # This is almost always required by cloud Redis providers.
+        # WARNING: Hardcoding secrets is a security risk. Use environment variables in production.
+        redis_url = "rediss://default:51SWVc4IIcxy9obgiDUL4wy3jlUR5mgH@redis-16077.crce214.us-east-1-3.ec2.redns.redis-cloud.com:16077"
 
         try:
             self.redis_client = redis.from_url(redis_url)
-            # Test the connection to fail early if credentials are wrong
             self.redis_client.ping()
-            print("Successfully connected to Redis Cloud.")
+            print("Successfully connected to Redis Cloud via SSL.")
         except Exception as e:
-            print(f"CRITICAL: Could not connect to Redis. Check your connection URL and credentials. Error: {e}")
+            print(f"CRITICAL: Could not connect to Redis. Error: {e}")
             self.redis_client = None
 
     def _generate_credentials(self):
@@ -51,24 +49,28 @@ class AccountManager:
         return email, password
 
     async def _get_verification_link(self, client: httpx.AsyncClient, email: str) -> Optional[str]:
-        """Polls the temporary email inbox asynchronously."""
-        for _ in range(10):  # Try for 50 seconds
+        """Polls the inbox, respecting serverless timeout limits."""
+        # ## FIX 2: Reduce polling duration to avoid Vercel's 10-second timeout.
+        # 3 attempts with a 2-second delay is ~6 seconds, which is safe.
+        for _ in range(3):
             print(f"Checking inbox for {email}...")
             try:
-                inbox_res = await client.get(f"{TEMP_MAIL_API_BASE}/emails/{email}")
+                inbox_res = await client.get(f"{TEMP_MAIL_API_BASE}/emails/{email}", timeout=5.0)
                 inbox_res.raise_for_status()
                 inbox_data = inbox_res.json()
                 if inbox_data.get("success") and inbox_data.get("result"):
                     email_id = inbox_data["result"][0].get("id")
-                    content_res = await client.get(f"{TEMP_MAIL_API_BASE}/inbox/{email_id}")
+                    content_res = await client.get(f"{TEMP_MAIL_API_BASE}/inbox/{email_id}", timeout=5.0)
                     html_content = content_res.json()["result"]["html_content"]
                     soup = BeautifulSoup(html_content, 'html.parser')
                     link_tag = soup.find('a', string=re.compile(r'\s*Verify my email\s*'))
                     if link_tag and 'href' in link_tag.attrs:
+                        print("Verification link found.")
                         return link_tag['href']
             except Exception as e:
                 print(f"Warning: Issue while polling email: {e}")
-            await asyncio.sleep(5)
+            await asyncio.sleep(2)
+        print("Verification link not found in time.")
         return None
 
     async def create_new_account(self):
@@ -78,16 +80,13 @@ class AccountManager:
 
         print("Creating a new account and saving state to Redis...")
         email, password = self._generate_credentials()
-        credentials = {
-            "email": email, "firstName": "Test", "lastName": "User",
-            "password": password, "referredBy": ""
-        }
+        credentials = {"email": email, "firstName": "Test", "lastName": "User", "password": password, "referredBy": ""}
 
-        async with httpx.AsyncClient(timeout=30.0) as client:
+        async with httpx.AsyncClient(timeout=9.0) as client:
             await client.post(f"{BANK_API_BASE}/register", json=credentials)
             verification_link = await self._get_verification_link(client, email)
             if not verification_link:
-                raise HTTPException(status_code=504, detail="Could not retrieve verification email.")
+                raise HTTPException(status_code=504, detail="Could not retrieve verification email within the time limit.")
             
             await client.get(verification_link, follow_redirects=True)
             
@@ -95,19 +94,13 @@ class AccountManager:
             login_res.raise_for_status()
             token = login_res.json()["token"]
 
-            # Save state to Redis
             self.redis_client.set("auth_token", token)
             self.redis_client.set("credits", 5)
             print("New account state saved successfully to Redis.")
             return token
 
     async def get_valid_token(self) -> str:
-        """
-        Retrieves a valid token from Redis, creating a new account if necessary.
-        """
-        if not self.redis_client:
-            raise HTTPException(status_code=503, detail="State management service (Redis) is not available.")
-
+        """Retrieves a valid token from Redis, creating a new account if necessary."""
         credits_bytes = self.redis_client.get("credits")
         credits = int(credits_bytes) if credits_bytes else 0
 
@@ -133,7 +126,8 @@ class AccountManager:
 app = FastAPI(
     title="Vercel-Hosted Bank Statement Converter API",
     description="An efficient, serverless API wrapper using Redis for state management.",
-    version="3.1.0",
+    version="3.2.0-hotfix",
+    docs_url=None, redoc_url=None, # Disabling docs on production endpoint
 )
 
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
@@ -148,6 +142,10 @@ def read_root():
 
 @app.post("/api/convert-statement", summary="Convert a Bank Statement PDF to CSV")
 async def convert_bank_statement(file: UploadFile = File(..., description="The bank statement PDF file to be converted.")):
+    # ## FIX 3: Add a guard clause to prevent crashes if Redis connection failed.
+    if not account_manager.redis_client:
+        raise HTTPException(status_code=503, detail="State management service is currently unavailable. Please try again later.")
+
     if not file.filename or not file.filename.lower().endswith('.pdf'):
         raise HTTPException(status_code=400, detail="Invalid file type. Please upload a PDF.")
 
@@ -155,7 +153,7 @@ async def convert_bank_statement(file: UploadFile = File(..., description="The b
         token = await account_manager.get_valid_token()
         headers = {"Authorization": token}
         
-        async with httpx.AsyncClient(timeout=60.0) as client:
+        async with httpx.AsyncClient(timeout=9.0) as client:
             files = {'files': (file.filename, file.file, file.content_type)}
             upload_res = await client.post(f"{BANK_API_BASE}/BankStatement", headers=headers, files=files)
             upload_res.raise_for_status()
@@ -165,8 +163,7 @@ async def convert_bank_statement(file: UploadFile = File(..., description="The b
             convert_headers['Content-Type'] = 'text/plain;charset=UTF-8'
             convert_res = await client.post(
                 f"{BANK_API_BASE}/BankStatement/convert?format=CSV", 
-                headers=convert_headers,
-                content=json.dumps([file_uuid])
+                headers=convert_headers, content=json.dumps([file_uuid])
             )
             convert_res.raise_for_status()
             
