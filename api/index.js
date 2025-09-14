@@ -2,39 +2,50 @@
 const express = require('express');
 const multer = require('multer');
 const fs = require('fs').promises;
-const path = require('path');
 const cors = require('cors');
 const { Redis } = require('@upstash/redis');
 
-const apiCalls = require('../apiCalls'); // Note the ../ path
-const utils = require('../utils');     // Note the ../ path
+const apiCalls = require('../apiCalls');
+const utils = require('../utils');
 
-// --- Application Setup ---
 const app = express();
-app.use(cors()); // Enable CORS for all origins
+app.use(cors());
 
-// **VERCEL FIX**: Use the /tmp directory for file uploads, as it's the only writable path.
+// Use /tmp for file uploads in Vercel's serverless environment
 const upload = multer({ dest: '/tmp' });
 
-// --- Persistent State Management with Vercel Redis ---
+// Initialize Redis client. Vercel automatically provides the environment variables.
 const redis = new Redis({
   url: process.env.UPSTASH_REDIS_REST_URL,
   token: process.env.UPSTASH_REDIS_REST_TOKEN,
 });
+
 const SESSION_KEY = "bank_converter_session";
 const MAX_USAGE = 5;
 const MAX_REGISTRATION_ATTEMPTS = 3;
 
+async function loadSession() { /* ... (unchanged) ... */ }
+async function saveSession(sessionData) { /* ... (unchanged) ... */ }
+async function createNewSession() { /* ... (unchanged) ... */ }
+async function getValidToken() { /* ... (unchanged) ... */ }
+
+// --- API Endpoints ---
+app.get('/api', (req, res) => {
+    res.status(200).json({ status: "Bank Statement Converter API is operational on Vercel" });
+});
+
+app.post('/api/convert-statement', upload.single('file'), async (req, res) => { /* ... (unchanged) ... */ });
+
+module.exports = app;
+
+// --- Helper Functions (unchanged from previous response) ---
 async function loadSession() {
     const session = await redis.get(SESSION_KEY);
     return session || { token: null, usage_count: 0 };
 }
-
 async function saveSession(sessionData) {
     await redis.set(SESSION_KEY, JSON.stringify(sessionData));
 }
-
-// createNewSession and getValidToken now use the async Redis functions
 async function createNewSession() {
     console.log("--- Attempting to create a new session ---");
     for (let attempt = 1; attempt <= MAX_REGISTRATION_ATTEMPTS; attempt++) {
@@ -65,7 +76,6 @@ async function createNewSession() {
     }
     throw new Error("Failed to create a new session after multiple attempts.");
 }
-
 async function getValidToken() {
     let session = await loadSession();
     if (!session.token || session.usage_count >= MAX_USAGE) {
@@ -74,12 +84,6 @@ async function getValidToken() {
     }
     return session.token;
 }
-
-// --- API Endpoints ---
-app.get('/api', (req, res) => {
-    res.status(200).json({ status: "Bank Statement Converter API is fully operational on Vercel" });
-});
-
 app.post('/api/convert-statement', upload.single('file'), async (req, res) => {
     if (!req.file) {
         return res.status(400).json({ error: "No file part in the request. Key must be 'file'." });
@@ -91,18 +95,14 @@ app.post('/api/convert-statement', upload.single('file'), async (req, res) => {
         console.log("Uploading bank statement...");
         const uploadUuid = await apiCalls.uploadStatement(authToken, tempPath, req.file.originalname);
         console.log(`Upload successful. UUID: ${uploadUuid}`);
-        
         const csvData = await apiCalls.pollAndConvertStatement(authToken, uploadUuid);
-
         const session = await loadSession();
         session.usage_count = (session.usage_count || 0) + 1;
         await saveSession(session);
         console.log(`Token usage updated to: ${session.usage_count}/${MAX_USAGE}`);
-        
         res.setHeader('Content-disposition', `attachment; filename=converted_${req.file.originalname}.csv`);
         res.set('Content-Type', 'text/csv');
         res.status(200).send(csvData);
-
     } catch (error) {
         console.error("An error occurred in the main endpoint:", error.message);
         res.status(500).json({ error: `An internal server error occurred. Check Vercel logs for details.` });
@@ -110,7 +110,3 @@ app.post('/api/convert-statement', upload.single('file'), async (req, res) => {
         await fs.unlink(tempPath).catch(err => console.error(`Failed to cleanup temp file: ${err.message}`));
     }
 });
-
-// **VERCEL FIX**: Export the Express app instance for Vercel's serverless environment.
-// Do NOT call app.listen() here.
-module.exports = app;
