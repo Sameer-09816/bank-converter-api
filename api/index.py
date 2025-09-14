@@ -2,13 +2,14 @@
 import os
 import json
 import logging
+import traceback
 import aiofiles
-from fastapi import FastAPI, UploadFile, File, HTTPException
-from fastapi.responses import Response
+from fastapi import FastAPI, UploadFile, File, HTTPException, Request
+from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from upstash_redis import Redis
 
-# Vercel's build environment places our root files where they can be imported directly.
+# Vercel's build environment places root files where they can be imported directly.
 import api_calls
 import utils
 
@@ -21,21 +22,62 @@ app.add_middleware(
 )
 logging.basicConfig(level=logging.INFO)
 
-# --- Persistent State Management with Vercel Redis ---
-redis = Redis(url=os.environ['UPSTASH_REDIS_REST_URL'], token=os.environ['UPSTASH_REDIS_REST_TOKEN'])
+
+# --- Robust Initialization with Environment Variable Checks ---
+REDIS_URL = os.environ.get('UPSTASH_REDIS_REST_URL')
+REDIS_TOKEN = os.environ.get('UPSTASH_REDIS_REST_TOKEN')
+
+if not all([REDIS_URL, REDIS_TOKEN]):
+    # This will be logged on Vercel if the variables are missing
+    logging.error("FATAL ERROR: Redis environment variables are not set.")
+    # We create a dummy Redis object to prevent an immediate crash,
+    # but any route that uses it will fail gracefully.
+    redis = None
+else:
+    redis = Redis(url=REDIS_URL, token=REDIS_TOKEN)
+
 SESSION_KEY = "py_bank_converter_session_final"
 MAX_USAGE = 5
 MAX_REGISTRATION_ATTEMPTS = 3
 
-# ... (The rest of the file is unchanged, but included for completeness)
+
+# --- Global Exception Handler (CRITICAL FIX) ---
+# This will catch any unhandled exception and prevent the function from crashing.
+@app.exception_handler(Exception)
+async def global_exception_handler(request: Request, exc: Exception):
+    error_traceback = traceback.format_exc()
+    logging.error(f"Unhandled exception for request {request.url.path}: {exc}")
+    logging.error(error_traceback)
+    return JSONResponse(
+        status_code=500,
+        content={
+            "error": "Internal Server Error",
+            "message": "An unexpected error occurred. The server logs have more details.",
+            "exception_type": type(exc).__name__
+        },
+    )
+
+
+async def check_redis_connection():
+    """Helper function to check for Redis before any operation."""
+    if redis is None:
+        raise HTTPException(
+            status_code=503, 
+            detail="Service Unavailable: Redis database is not configured. Please check server environment variables."
+        )
+
+# --- State Management (Now with connection checks) ---
 async def load_session():
+    await check_redis_connection()
     session_str = await redis.get(SESSION_KEY)
     return json.loads(session_str) if session_str else {"token": None, "usage_count": 0}
 
 async def save_session(session_data):
+    await check_redis_connection()
     await redis.set(SESSION_KEY, json.dumps(session_data))
 
 async def create_new_session():
+    # ... (This function's internal logic remains the same)
     logging.info("--- Attempting to create a new session ---")
     for attempt in range(MAX_REGISTRATION_ATTEMPTS):
         logging.info(f"Registration attempt {attempt + 1}/{MAX_REGISTRATION_ATTEMPTS}")
@@ -52,7 +94,6 @@ async def create_new_session():
                 if not link: raise Exception("Failed to extract verification link.")
                 await api_calls.verify_email_account(link)
                 token = await api_calls.login(creds['email'], creds['password'])
-                
                 new_session = {"token": token, "usage_count": 0}
                 await save_session(new_session)
                 logging.info("--- New session created and saved ---")
@@ -63,6 +104,7 @@ async def create_new_session():
             logging.error(f"Exception during session creation attempt {attempt + 1}: {e}", exc_info=True)
     raise Exception("Failed to create a new session after multiple attempts.")
 
+
 async def get_valid_token():
     session = await load_session()
     if not session.get("token") or session.get("usage_count", 0) >= MAX_USAGE:
@@ -70,6 +112,7 @@ async def get_valid_token():
         session = await create_new_session()
     return session["token"]
 
+# --- API Endpoints ---
 @app.get("/api")
 async def root():
     return {"status": "Bank Statement Converter API is fully operational on Vercel with FastAPI"}
@@ -100,9 +143,7 @@ async def convert_statement_endpoint(file: UploadFile = File(...)):
         
         headers = {'Content-Disposition': f'attachment; filename="converted_{file.filename}.csv"'}
         return Response(content=csv_data, media_type='text/csv', headers=headers)
-    except Exception as e:
-        logging.error(f"An error occurred in the main endpoint: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"An internal server error occurred: {str(e)}")
+
     finally:
         if os.path.exists(temp_path):
             os.remove(temp_path)
